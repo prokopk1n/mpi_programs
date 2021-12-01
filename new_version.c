@@ -4,14 +4,19 @@
 #include <assert.h>
 #include <mpi.h>
 #include <string.h>
+#include <time.h>
 
+#define N 10
 #define accuracy 0.00001
 
 #define create_checkpoint(func_call, matrix, size) \
-    {double * buf_checkpoint = malloc(size);\
+    {double * buf_checkpoint = calloc(size, 1);\
     memcpy(buf_checkpoint , matrix, size);\
     do{memcpy(matrix, buf_checkpoint , size);error = 0; func_call;}while(error == 1);\
     free(buf_checkpoint);}
+
+#define __error_situation__ if (ProcRank == N-1 && rand()%10 == 0) \
+    {printf("Myrank = %d Line=%d and I exit\n", ProcRank, __LINE__); exit(0);}
 
 //у каждого процесса актуальная матрица
 //m - столбцы, n - строки
@@ -59,20 +64,19 @@ void verbose_errhandler(MPI_Comm *comm, int *perr, ...)
     int *ranks_gc, *ranks_gf;
 
     MPI_Error_class(err, &eclass); 
-    if( MPIX_ERR_PROC_FAILED != eclass ) { 
+    if( MPIX_ERR_PROC_FAILED != eclass && eclass != MPIX_ERR_REVOKED) { 
         MPI_Abort(*comm, err); 
     }
+    if (ProcRank == 0)
+        printf("ERROR OCCURED!\n");
 
-    printf("ERROR OCCURED!\n");
-    //создаём новый коммуникатор
     MPIX_Comm_shrink(*comm, &comm_world);
-    error = 1; 
 
+    error = 1; 
     MPI_Comm_rank(comm_world, &ProcRank);
     MPI_Comm_size(comm_world, &ProcNum);
 
     calculate_parametres_for_allgather();
-
 }
 
 double * get_matrix(int n,int m, FILE* myfile)
@@ -108,6 +112,8 @@ void find_major_elements_array(double * matrix,int n, int m, int ** major_array)
     int * array = calloc(n,sizeof(int));
     int * buf_send = calloc(n,sizeof(int));
 
+    __error_situation__
+
     int real_n = n / ProcNum;
 
     int buf_size = n % ProcNum;
@@ -131,13 +137,18 @@ void find_major_elements_array(double * matrix,int n, int m, int ** major_array)
 
     }
 
+    __error_situation__
+
     int from_n = displs[ProcRank];
     real_n = recvcounts[ProcRank];
 
-    for (int i=from_n;i<from_n + recvcounts[ProcRank];i++)
+    //printf("real_n = %d, from_n = %d\n", real_n, from_n);
+    for (int i=from_n;i<from_n + real_n;i++)
     {
         array[i] = find_major_element(matrix + i*m, m);
     }
+
+    __error_situation__
 
     memcpy(buf_send, array+from_n, real_n * sizeof(int));
     MPI_Allgatherv(buf_send,real_n,MPI_INT,array,recvcounts,displs, MPI_INT, comm_world);
@@ -160,13 +171,17 @@ void swap_strings(double * matrix,int i,int m)
     memcpy(matrix + i*m + from_m, matrix + from_m, real_m * sizeof(double));
     memcpy(matrix + from_m, buffer, real_m * sizeof(double));
 
-
+    __error_situation__
+    
     memcpy(buf_send, matrix + from_m, real_m * sizeof(double));
     MPI_Allgatherv(buf_send, real_m, MPI_DOUBLE, matrix, recvcounts_for_m, displs_for_m, MPI_DOUBLE, comm_world);
 
     if (!error)
+    {
+        __error_situation__
         memcpy(buf_send, matrix + i*m + from_m, real_m * sizeof(double));
         MPI_Allgatherv(buf_send, real_m, MPI_DOUBLE, matrix + i*m, recvcounts_for_m, displs_for_m, MPI_DOUBLE, comm_world);
+    }
 
     free(buf_send);
     free(buffer);
@@ -196,8 +211,8 @@ void swap_string_with_zero(double * matrix, int n1, int n2, int m)
     if (n1==n2)
         return;
 
-    if (ProcRank == 2)
-        exit(0);
+    __error_situation__
+
     double * buf_send = calloc(real_m, sizeof(double));
 
     memcpy(matrix+n1*m + from_m, matrix+n2*m + from_m, real_m * sizeof(double));
@@ -206,7 +221,6 @@ void swap_string_with_zero(double * matrix, int n1, int n2, int m)
 
     memcpy(buf_send, matrix + n1*m + from_m, real_m * sizeof(double));
     MPI_Allgatherv(buf_send, real_m, MPI_DOUBLE, matrix + n1*m, recvcounts_for_m, displs_for_m, MPI_DOUBLE, comm_world);
-
     if (!error)
     {
         memcpy(buf_send, matrix + n2*m + from_m, real_m * sizeof(double));
@@ -226,6 +240,8 @@ int zero_string_to_end(double * matrix,int n, int m, int * array)
     {
         if (array[i]==0)
         {
+            __error_situation__
+
             create_checkpoint(swap_string_with_zero(matrix,i,n-amount-1,m), matrix, n*m*sizeof(double));
             array[i]=array[n-amount-1];
             array[n-amount-1] = 0;
@@ -249,38 +265,66 @@ void output_matrix(double * matrix, int n, int m, FILE * output_file)
 }
 
 
-//вычитание строк
-void sub_strings(double* matrix, int* major_elements_array, int n)
+void matrix_print(double * matrix, int n, int m)
 {
+    for (int i=0;i<n;i++)
+    {
+        for (int j=0;j<m;j++)
+            printf("%lf ",*(matrix+i*m+j));
+        printf("\n");
+    }
+    printf("\n");
+}
+
+//вычитание строк
+void sub_strings(double* matrix, int* major_elements_array, int n, int m)
+{
+    //matrix_print(matrix, n, m);
+    //sleep(1);
+
+
+    //for (int j=0;j<n;j++)
+        //printf("%d ", major_elements_array[j]);
+    //printf("\n");
     double * buf_send = calloc(n * m,sizeof(double));
     int recvcounts_for_n[ProcNum];
     int displs_for_n[ProcNum];
-    int from_n, buf;
+    int from_n;
     int real_n = n / ProcNum;
     int buf_size = n % ProcNum;
     for (int i=0; i<ProcNum; i++)
     {
         if (i < buf_size)
         {
-        recvcounts_for_n[i] = (real_n + 1) * m;
-        displs_for_n[i] = i * (real_n + 1) * m + m;
+            recvcounts_for_n[i] = (real_n + 1) * m;
+            displs_for_n[i] = i * (real_n + 1) * m;
         }
         else
         {
-        recvcounts_for_n[i] = real_n * m;
-        displs_for_n[i] = m * (i * real_n + buf_size) + m;
+            recvcounts_for_n[i] = real_n * m;
+            displs_for_n[i] = m * (i * real_n + buf_size);
         }
     }
 
+    __error_situation__
+
     real_n = recvcounts_for_n[ProcRank] / m;
-    from_n = (displs_for_n[ProcRank] - m) / m ;
+    from_n = displs_for_n[ProcRank] / m ;
+    double buf;
+
+    //printf("real_n = %d from_n = %d\n", real_n, from_n);
 
     //делим между процессами построчно, вычитаем строки
     for (int j=from_n;j<from_n+real_n;j++)
     {
+        if (j == 0)
+            continue;
+        //printf("%d == %d\n", major_elements_array[j], major_elements_array[0] );
         if (major_elements_array[j]==major_elements_array[0])
         {
+            //printf("HERE\n");
             buf = (*(matrix+j*m + major_elements_array[j]-1)) / (*(matrix + major_elements_array[0]-1));
+            //printf("buf = %f\n", buf);
 
 
                 for (int k=major_elements_array[0]-1;k<m;k++)
@@ -288,39 +332,60 @@ void sub_strings(double* matrix, int* major_elements_array, int n)
                     (*(matrix+j*m + k)) -= (*(matrix + k)) * buf;
                 }
 
+            //matrix_print(matrix, n, m);
+            //sleep(3);
         }
     }
+    //printf("OUT\n");
 
     //if (ProcRank > 3 && ProcRank == ProcNum - 1)
             //exit(0);
-    memcpy(buf_send, matrix + m + from_n*m, real_n * m * sizeof(double));
+    memcpy(buf_send, matrix + from_n*m, real_n * m * sizeof(double));
     MPI_Allgatherv(buf_send, real_n * m, MPI_DOUBLE, matrix, recvcounts_for_n, displs_for_n, MPI_DOUBLE, comm_world);
+    //printf("HELLO\n");
+    //matrix_print(matrix, n, m);
 }
-
 
 
 int to_trapec_matrix(double * matrix, int n, int m)
 {
     int * major_elements_array = NULL;
 
-    double * buf_matrix = NULL;
+    create_checkpoint(find_major_elements_array(matrix,n,m, &major_elements_array), matrix, m*n*sizeof(double));
+    n -= zero_string_to_end(matrix,n,m,major_elements_array);
+
+    double * buf_matrix = matrix;
     double * buf_send = calloc(n * m,sizeof(double));
 
     int i = 0;
     while (i<n-1)
     {
-        //if (ProcRank == ProcNum - 1 && i == 0)
-            //exit(0);
-        buf_matrix = matrix+i*m;
-        create_checkpoint(find_major_elements_array(buf_matrix,n,m, &major_elements_array), buf_matrix, m*n*sizeof(double));
-        n -= zero_string_to_end(buf_matrix,n,m,major_elements_array);
+        //matrix_print(matrix, n, m);
+        //sleep(1);
+
+        __error_situation__
+
+        //for (int j=0;j<n-i;j++)
+            //printf("OPA = %d\n", major_elements_array[j]);
+        //matrix_print(matrix, n, m);
+        //sleep(1);
         step_one(buf_matrix, n-i, m, major_elements_array);
-        if (ProcRank != 0 && ProcRank == ProcNum - 1 && i == 1)
-            exit(0);
-        create_checkpoint(sub_strings(buf_matrix, major_elements_array, n-i), buf_matrix, (n-i)*m*sizeof(double));
+        //matrix_print(matrix, n, m);
+        //sleep(5);
+        create_checkpoint(sub_strings(buf_matrix, major_elements_array, n-i, m), buf_matrix, (n-i)*m*sizeof(double));
+        //printf("HELLO\n");
+        //matrix_print(matrix, n, m);
         free(major_elements_array);
         major_elements_array = NULL;
+        //printf("HELLO\n");
+        //matrix_print(matrix, n, m);
+        //sleep(3);
+
         i+=1;
+
+        buf_matrix = matrix+i*m;
+        create_checkpoint(find_major_elements_array(buf_matrix,n - i,m, &major_elements_array), buf_matrix, m*n*sizeof(double));
+        n -= zero_string_to_end(buf_matrix,n - i,m,major_elements_array);
     }
 
     free(buf_send);
@@ -347,19 +412,18 @@ int main(int argc, char **argv)
     int res1 = 0;
 
     myfile = fopen(argv[1],"r");
-
     fscanf(myfile,"%d%d",&n,&m);
-
     matrix = get_matrix(n,m,myfile);
+    fclose(myfile);
 
     MPI_Init(NULL, NULL);
     MPI_Comm_size(comm_world, &ProcNum);
     MPI_Comm_rank(comm_world, &ProcRank);
 
+    srand(time(NULL) + ProcRank); 
+
     MPI_Comm_create_errhandler(verbose_errhandler, &errh);
     MPI_Comm_set_errhandler(comm_world, errh);
-
-
 
     start_time = MPI_Wtime();
 
@@ -379,10 +443,10 @@ int main(int argc, char **argv)
         output_matrix(matrix,n,m,output_file);
     }
 
-
-    fclose(myfile);
     fclose(output_file);
+    //printf("HERE\n");
     free(matrix);
+    //printf("HERE\n");
     MPI_Finalize();
 
     return 0;
